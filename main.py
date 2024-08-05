@@ -33,9 +33,6 @@ DEALINGS IN THE SOFTWARE.
 
 """
 
-
-
-
 from typing import Callable, Optional, List, Tuple
 
 import torch
@@ -48,6 +45,29 @@ from torchvision import transforms
 
 
 class PruningObjective:
+    """
+    Simpler wrapper for neural network pruning objective.
+
+    Attributes:
+        prunable_weights: A list of tuples that contain the modules, the
+        parameter name within the module (e.g. 'weight' or 'bias') and
+        the full name of the parameter as listed in model.named_parameters().
+
+        pruning_ratio: The pruning ratio as float between 0 and 1. 1 corresponds
+        to all weights being pruned.
+
+        pruning_steps: How many iterations of pruning shall be performed.
+        1 means all weights being pruned in one step. A higher number would
+        only prune a subset of weights per iteration and then fine-tune the
+        model until convergence until pruning the next set of weights. After
+        pruning_steps-many steps, pruning_ratio is achieved.
+
+        saliency_criterion: 'magnitude' for l1-pruning and 'fisher-information'
+        for Fisher-information based pruning.
+
+        convergence_patience: How many model evaluations (on val data) to wait
+        to determine loss convergence.
+    """
     def __init__(
             self,
             prunable_weights: List[Tuple[nn.Module, str, str]],
@@ -64,7 +84,9 @@ class PruningObjective:
 
 
 class TrainingObjective:
-    # TODO doc
+    """
+    Simpler wrapper for neural network training objective.
+    """
     def __init__(
             self,
             model: nn.Module,
@@ -80,7 +102,9 @@ class TrainingObjective:
 
 
 class TrainingArguments:
-    # TODO doc
+    """
+    Simpler wrapper for neural network training parameters.
+    """
     def __init__(
             self,
             batch_size: int,
@@ -104,13 +128,12 @@ def run_pruning_loop(
     then fine-tunes the network until convergence, and repeats until a given
     level of sparsity is reached.
 
-    # TODO Add unlisted parameters here
-    :arg: pruning_ratio: float
-    The pruning ratio to be reached (0.9 means 90% of weights to be pruned)
-    :arg: pruning_steps: int
-    The number of pruning steps to perform until pruning_ratio is reached.
-
-    :return: TODO add return description
+    :param: pruning_objective: An instance of PruningObjective that describes the
+    parameters used for the pruning process.
+    :param: training_objective: An instance of TrainingObjective that describes
+    the model and data used.
+    :param: training_arguments: An instance of TrainingArguments that sets the
+    training parameters (learning rate, batch size, etc).
     """
 
     writer = SummaryWriter()
@@ -125,8 +148,7 @@ def run_pruning_loop(
 
         # 2. Prune the next set of weights
         print("pruning...")
-        prune_next_weights(
-            training_objective.model, pruning_objective, saliencies)
+        prune_next_weights(pruning_objective, saliencies)
         writer.add_scalar(
             "pruning / global step", 1, global_training_step)
 
@@ -205,7 +227,15 @@ def compute_weight_saliencies(
         pruning_objective: PruningObjective,
         training_objective: TrainingObjective,
         training_arguments: TrainingArguments) -> dict[str, torch.Tensor]:
-    # TODO doc
+    """
+    This function computes the considered model's weight saliencies for all
+    weights that can be pruned. For parameter descriptions, see
+    run_pruning_loop(..).
+
+    :return: A dictionary describing all prunable weights' saliencies. As key
+    it uses the parameter names as returned by model.named_parameters().
+    Smaller saliency values indicate "better" prunability.
+    """
 
     saliencies = {}
 
@@ -213,19 +243,20 @@ def compute_weight_saliencies(
         case 'magnitude':
             for pw_module, pw_name, pw_fullname \
                     in pruning_objective.prunable_weights:
-                if hasattr(pw_module, pw_name):
-                    p = getattr(pw_module, pw_name)
-                    saliencies[pw_fullname] = p.abs().clone().detach()
-                else:
+                if hasattr(pw_module, pw_name + "_orig"):
                     p = getattr(pw_module, pw_name + "_orig")
                     saliencies[pw_fullname] = p.abs().clone().detach()
+                    # Set saliencies of already pruned neurons to infinity
+                    # such that they don't get "pruned again".
                     mask = getattr(pw_module, pw_name + "_mask")
-                    saliencies[pw_fullname] *= mask
-
+                    saliencies[pw_fullname][mask == 0] = float('inf')
+                else:
+                    p = getattr(pw_module, pw_name)
+                    saliencies[pw_fullname] = p.abs().clone().detach()
 
         case 'fisher-information':
-            dataloader = None  # TODO, set batch size to 1!
-            raise NotImplementedError()
+            dataloader = DataLoader(training_objective.val_dataset,
+                                    batch_size=1, shuffle=False)
             model = training_objective.model
 
             for _, _, pw_fullname \
@@ -245,23 +276,28 @@ def compute_weight_saliencies(
                 loss.backward()
 
                 # Compute Fisher-information for all prunable weights
-
-                if hasattr(pw_module, pw_name):
-                    p = getattr(pw_module, pw_name)
-                    saliencies[pw_fullname] += p.grad.square()
-                else:
-                    p = getattr(pw_module, pw_name + "_orig")
-                    saliencies[pw_fullname] += p.grad.square()
+                for pw_module, pw_name, pw_fullname \
+                        in pruning_objective.prunable_weights:
+                    if hasattr(pw_module, pw_name + "_orig"):
+                        p = getattr(pw_module, pw_name + "_orig")
+                        saliencies[pw_fullname] += p.grad ** 2
+                    else:
+                        p = getattr(pw_module, pw_name)
+                        saliencies[pw_fullname] += p.grad ** 2
 
             # Scale Fisher-information by squared weight values
-            if hasattr(pw_module, pw_name):
-                p = getattr(pw_module, pw_name)
-                saliencies[pw_fullname] *= p.square()
-            else:
-                p = getattr(pw_module, pw_name + "_orig")
-                saliencies[pw_fullname] *= p.square()
-                mask = getattr(pw_module, pw_name + "_mask")
-                saliencies[pw_fullname] *= mask
+            for pw_module, pw_name, pw_fullname \
+                    in pruning_objective.prunable_weights:
+                if hasattr(pw_module, pw_name + "_orig"):
+                    p = getattr(pw_module, pw_name + "_orig")
+                    saliencies[pw_fullname] *= p ** 2
+                    # Set saliencies of already pruned neurons to infinity
+                    # such that they don't get "pruned again".
+                    mask = getattr(pw_module, pw_name + "_mask")
+                    saliencies[pw_fullname][mask == 0] = float('inf')
+                else:
+                    p = getattr(pw_module, pw_name)
+                    saliencies[pw_fullname] *= p ** 2
 
         case _:
             raise ValueError(f"Saliency criterion "
@@ -272,10 +308,15 @@ def compute_weight_saliencies(
 
 
 def prune_next_weights(
-        model: nn.Module,
         pruning_objective: PruningObjective,
         saliencies: dict[str, torch.Tensor]) -> None:
-    # TODO doc
+    """
+    This function performs the actual weight pruning.
+
+    :param pruning_objective: See run_pruning_loop(..)
+    :param saliencies: A dictionary description weight saliencies as e.g.
+    returned by compute_weight_saliencies(..). See doc for details.
+    """
 
     final_unpruned_ratio = 1 - pruning_objective.pruning_ratio
     step_unpruned_ratio = (final_unpruned_ratio **
@@ -287,35 +328,44 @@ def prune_next_weights(
             module, name, step_pruning_ratio, saliencies[fullname])
 
 
-alexnet = torch.hub.load('pytorch/vision:v0.10.0', 'alexnet', pretrained=True)
-normalize = transforms.Normalize(
-    mean=[0.4914, 0.4822, 0.4465],
-    std=[0.2023, 0.1994, 0.2010])
-transform = transforms.Compose([
-    transforms.Resize((227, 227)),
-    transforms.ToTensor(),
-    normalize,
-])
-train_dataset = torchvision.datasets.CIFAR10(
-    root='./data', train=True,
-    download=True, transform=transform,
-)
-train_dataset = Subset(train_dataset, range(1000))
-val_test_dataset = torchvision.datasets.CIFAR10(
-    root='./data', train=False,
-    download=True, transform=transform,
-)
-val_test_dataset = Subset(val_test_dataset, range(1000))
-val_dataset, test_dataset = torch.utils.data.random_split(val_test_dataset, [600, 400])
+def benchmark_alexnet():
+    alexnet = torch.hub.load(
+        'pytorch/vision:v0.10.0', 'alexnet', pretrained=True)
+    normalize = transforms.Normalize(
+        mean=[0.4914, 0.4822, 0.4465],
+        std=[0.2023, 0.1994, 0.2010])
+    transform = transforms.Compose([
+        transforms.Resize((227, 227)),
+        transforms.ToTensor(),
+        normalize,
+    ])
+    train_dataset = torchvision.datasets.CIFAR10(
+        root='./data', train=True,
+        download=True, transform=transform,
+    )
+    train_dataset = Subset(train_dataset, range(1000))
+    val_test_dataset = torchvision.datasets.CIFAR10(
+        root='./data', train=False,
+        download=True, transform=transform,
+    )
+    val_test_dataset = Subset(val_test_dataset, range(1000))
+    val_dataset, test_dataset = (
+        torch.utils.data.random_split(val_test_dataset, [600, 400]))
 
-_prunable_weights = [
-    (alexnet.classifier[1], 'weight', 'classifier.1.weight'),
-    (alexnet.classifier[4], 'weight', 'classifier.4.weight'),
-    (alexnet.classifier[6], 'weight', 'classifier.6.weight'),
-]
+    _prunable_weights = [
+        (alexnet.classifier[1], 'weight', 'classifier.1.weight'),
+        (alexnet.classifier[4], 'weight', 'classifier.4.weight'),
+        (alexnet.classifier[6], 'weight', 'classifier.6.weight'),
+    ]
 
-_training_objective = TrainingObjective(alexnet, train_dataset, val_dataset, test_dataset, nn.CrossEntropyLoss())
-_training_arguments = TrainingArguments(16, 5e-4, 10)
-_pruning_objective = PruningObjective(_prunable_weights, 0.5, 30, 'magnitude', 0)
+    _training_objective = TrainingObjective(
+        alexnet, train_dataset, val_dataset,
+        test_dataset, nn.CrossEntropyLoss())
+    _training_arguments = TrainingArguments(16, 5e-4, 10)
+    _pruning_objective = PruningObjective(
+        _prunable_weights, 0.5, 30, 'fisher-information', 0)
 
-run_pruning_loop(_pruning_objective, _training_objective, _training_arguments)
+    run_pruning_loop(
+        _pruning_objective, _training_objective, _training_arguments)
+
+benchmark_alexnet()
