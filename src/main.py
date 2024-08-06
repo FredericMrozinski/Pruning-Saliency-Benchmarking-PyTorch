@@ -32,9 +32,10 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 
 """
-
+import random
 from typing import Callable, Optional, List, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.utils.prune as prune
@@ -93,7 +94,7 @@ class TrainingObjective:
             train_dataset: Dataset,
             val_dataset: Dataset,
             test_dataset: Dataset,
-            loss: Callable[[torch.Tensor, torch.Tensor], float]):
+            loss: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]):
         self.model = model
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
@@ -177,14 +178,20 @@ def run_pruning_loop(
             model.eval()
             with torch.no_grad():
                 v_loss = 0
+                correct_predictions = 0
                 for v_inpt, v_target in val_dataloader:
                     v_inpt = v_inpt.to(training_arguments.device)
                     v_target = v_target.to(training_arguments.device)
                     v_pred = model(v_inpt)
                     v_loss += training_objective.loss(v_pred, v_target)
+                    correct_predictions += sum(v_pred.argmax(dim=1) == v_target)
+
                 v_loss /= len(val_dataloader.dataset)
+                v_acc = correct_predictions / len(val_dataloader.dataset)
                 writer.add_scalar(
                     "val-loss / global step", v_loss, global_training_step)
+                writer.add_scalar(
+                    "val-acc / global step", v_acc, global_training_step)
             print("end evaluating...")
             return v_loss
 
@@ -328,7 +335,22 @@ def prune_next_weights(
             module, name, step_pruning_ratio, saliencies[fullname])
 
 
-def benchmark_alexnet():
+def fix_random_seed(seed: int) -> None:
+    """
+    Fixes a random seed for reproducibility.
+    :param seed: How about the meaning of everything like 42?
+    """
+
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def benchmark_alexnet(saliency_criterion: str):
+    fix_random_seed(42)
+
     alexnet = torch.hub.load(
         'pytorch/vision:v0.10.0', 'alexnet', pretrained=True)
     normalize = transforms.Normalize(
@@ -339,13 +361,13 @@ def benchmark_alexnet():
         transforms.ToTensor(),
         normalize,
     ])
-    train_dataset = torchvision.datasets.CIFAR10(
-        root='./data', train=True,
-        download=True, transform=transform,
+    train_dataset = torchvision.datasets.ImageNet(
+        root='../res/',
+        transform=transform,
     )
     train_dataset = Subset(train_dataset, range(1000))
-    val_test_dataset = torchvision.datasets.CIFAR10(
-        root='./data', train=False,
+    val_test_dataset = torchvision.datasets.ImageNet(
+        root='./data',
         download=True, transform=transform,
     )
     val_test_dataset = Subset(val_test_dataset, range(1000))
@@ -363,9 +385,10 @@ def benchmark_alexnet():
         test_dataset, nn.CrossEntropyLoss())
     _training_arguments = TrainingArguments(16, 5e-4, 10)
     _pruning_objective = PruningObjective(
-        _prunable_weights, 0.5, 30, 'fisher-information', 0)
+        _prunable_weights, 0.5, 5, saliency_criterion, 0)
 
     run_pruning_loop(
         _pruning_objective, _training_objective, _training_arguments)
 
-benchmark_alexnet()
+
+benchmark_alexnet('magnitude')
