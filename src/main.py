@@ -114,11 +114,13 @@ class TrainingArguments:
             batch_size: int,
             learning_rate: float,
             eval_steps: int,
+            weight_decay: Optional[float] = 0,
             device: Optional[str] = None):
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.device = device
         self.eval_steps = eval_steps
+        self.weight_decay = weight_decay
         if self.device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -201,37 +203,38 @@ def run_pruning_loop(
 
         best_val_score = eval_model()
         patience_count = 0
-        for inpt, target in train_dataloader:
-            if first_batch:
-                first_batch = False
-            else:
-                writer.add_scalar(
-                    "pruning / global step", 0, global_training_step)
-
-            optimizer.zero_grad()
-
-            inpt = inpt.to(training_arguments.device)
-            target = target.to(training_arguments.device)
-
-            model.train()
-            pred = model(inpt)
-            loss = training_objective.loss(pred, target)
-            writer.add_scalar(
-                "train-loss / global step", loss, global_training_step)
-            loss.backward()
-            optimizer.step()
-
-            global_training_step += 1
-            local_training_step += 1
-            if local_training_step % training_arguments.eval_steps == 0:
-                val_score = eval_model()
-                if val_score >= best_val_score:
-                    patience_count += 1
-                    if patience_count >= pruning_objective.convergence_patience:
-                        break
+        while patience_count < pruning_objective.convergence_patience:
+            for inpt, target in train_dataloader:
+                if first_batch:
+                    first_batch = False
                 else:
-                    patience_count = 0
-                    best_val_score = val_score
+                    writer.add_scalar(
+                        "pruning / global step", 0, global_training_step)
+
+                optimizer.zero_grad()
+
+                inpt = inpt.to(training_arguments.device)
+                target = target.to(training_arguments.device)
+
+                model.train()
+                pred = model(inpt)
+                loss = training_objective.loss(pred, target)
+                writer.add_scalar(
+                    "train-loss / global step", loss, global_training_step)
+                loss.backward()
+                optimizer.step()
+
+                global_training_step += 1
+                local_training_step += 1
+                if local_training_step % training_arguments.eval_steps == 0:
+                    val_score = eval_model()
+                    if val_score >= best_val_score:
+                        patience_count += 1
+                        if patience_count >= pruning_objective.convergence_patience:
+                            break
+                    else:
+                        patience_count = 0
+                        best_val_score = val_score
 
 
 def compute_weight_saliencies(
@@ -384,9 +387,9 @@ def benchmark_alexnet(saliency_criterion: str):
     _training_objective = TrainingObjective(
         alexnet, train_dataset, val_dataset,
         test_dataset, nn.CrossEntropyLoss())
-    _training_arguments = TrainingArguments(16, 5e-4, 10)
+    _training_arguments = TrainingArguments(32, 1e-4, 10, weight_decay=0.0005)
     _pruning_objective = PruningObjective(
-        _prunable_weights, 0.5, 5, saliency_criterion, 0)
+        _prunable_weights, 0.5, 5, saliency_criterion, 3)
 
     run_pruning_loop(
         _pruning_objective, _training_objective, _training_arguments)
