@@ -32,6 +32,7 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 
 """
+import datetime
 import random
 from typing import Callable, Optional, List, Tuple
 
@@ -69,6 +70,7 @@ class PruningObjective:
         convergence_patience: How many model evaluations (on val data) to wait
         to determine loss convergence.
     """
+
     def __init__(
             self,
             prunable_weights: List[Tuple[nn.Module, str, str]],
@@ -76,7 +78,6 @@ class PruningObjective:
             pruning_steps: int,
             saliency_criterion: str,
             convergence_patience: int):
-
         self.prunable_weights = prunable_weights
         self.pruning_ratio = pruning_ratio
         self.pruning_steps = pruning_steps
@@ -88,6 +89,7 @@ class TrainingObjective:
     """
     Simpler wrapper for neural network training objective.
     """
+
     def __init__(
             self,
             model: nn.Module,
@@ -106,6 +108,7 @@ class TrainingArguments:
     """
     Simpler wrapper for neural network training parameters.
     """
+
     def __init__(
             self,
             batch_size: int,
@@ -137,7 +140,8 @@ def run_pruning_loop(
     training parameters (learning rate, batch size, etc).
     """
 
-    writer = SummaryWriter()
+    writer = SummaryWriter(
+        f'../runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}')
     global_training_step = 0
 
     for prune_step in range(pruning_objective.pruning_steps):
@@ -361,18 +365,15 @@ def benchmark_alexnet(saliency_criterion: str):
         transforms.ToTensor(),
         normalize,
     ])
-    train_dataset = torchvision.datasets.ImageNet(
+    dataset = torchvision.datasets.ImageNet(
         root='../res/',
+        split='val',
         transform=transform,
     )
-    train_dataset = Subset(train_dataset, range(1000))
-    val_test_dataset = torchvision.datasets.ImageNet(
-        root='./data',
-        download=True, transform=transform,
-    )
-    val_test_dataset = Subset(val_test_dataset, range(1000))
-    val_dataset, test_dataset = (
-        torch.utils.data.random_split(val_test_dataset, [600, 400]))
+    dataset = Subset(dataset, range(3000))
+
+    train_dataset, val_dataset, test_dataset = (
+        torch.utils.data.random_split(dataset, [2000, 500, 500]))
 
     _prunable_weights = [
         (alexnet.classifier[1], 'weight', 'classifier.1.weight'),
