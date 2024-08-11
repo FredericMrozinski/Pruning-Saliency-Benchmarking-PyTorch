@@ -387,12 +387,13 @@ def benchmark_alexnet(saliency_criterion: str):
     _training_objective = TrainingObjective(
         alexnet, train_dataset, val_dataset,
         test_dataset, nn.CrossEntropyLoss())
-    _training_arguments = TrainingArguments(32, 1e-4, 10, weight_decay=0.0005)
+    _training_arguments = TrainingArguments(128, 1e-4, 10, weight_decay=0.0005)
     _pruning_objective = PruningObjective(
-        _prunable_weights, 0.5, 5, saliency_criterion, 3)
+        _prunable_weights, 0.7, 7, saliency_criterion, 5)
 
     run_pruning_loop(
         _pruning_objective, _training_objective, _training_arguments)
 
 
 benchmark_alexnet('magnitude')
+benchmark_alexnet('fisher-information')
